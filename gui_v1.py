@@ -91,6 +91,8 @@ if __name__ == "__main__":
     import torchaudio.transforms as tat
 
     from infer.lib import rtrvc as rvc_for_realtime
+    from infer.modules.ans.dfsmn import Dfsmn_infer
+    from infer.modules.ans.frcrn_infer import FRCRN_infer
     from i18n.i18n import I18nAuto
     from configs.config import Config
 
@@ -133,6 +135,7 @@ if __name__ == "__main__":
             self.wasapi_exclusive: bool = False
             self.sg_input_device: str = ""
             self.sg_output_device: str = ""
+            self.denoise_algo: str = "default"
 
     class GUI:
         def __init__(self) -> None:
@@ -316,6 +319,21 @@ if __name__ == "__main__":
                             ],
                         ],
                         title=i18n("音频设备"),
+                    ),
+                    sg.Frame(
+                        layout=[
+                            [
+                                sg.Text("算法选择"),
+                                sg.Combo(
+                                    ["默认算法", "DFSMN", "FRCRN"],
+                                    key="denoise_algo",
+                                    default_value="默认算法",
+                                    enable_events=True,
+                                    size=(20, 1),
+                                ),
+                            ]
+                        ],
+                        title="降噪模型（需要先开启“输入降噪”才有效）",
                     )
                 ],
                 [
@@ -693,6 +711,7 @@ if __name__ == "__main__":
             self.gui_config.rms_mix_rate = values["rms_mix_rate"]
             self.gui_config.index_rate = values["index_rate"]
             self.gui_config.n_cpu = values["n_cpu"]
+            self.gui_config.denoise_algo = values["denoise_algo"]
             self.gui_config.f0method = ["pm", "harvest", "crepe", "rmvpe", "fcpe"][
                 [
                     values["pm"],
@@ -718,11 +737,20 @@ if __name__ == "__main__":
                 self.config,
                 self.rvc if hasattr(self, "rvc") else None,
             )
-            self.gui_config.samplerate = (
-                self.rvc.tgt_sr
-                if self.gui_config.sr_type == "sr_model"
-                else self.get_device_samplerate()
-            )
+            if self.gui_config.I_noise_reduce:
+                if self.gui_config.denoise_algo == "DFSMN":
+                    self.dfsmn = Dfsmn_infer(os.getenv("weight_ans_path"), self.config.device)
+                    self.gui_config.samplerate = 48000
+                if self.gui_config.denoise_algo == "FRCRN":
+                    self.frcrn = FRCRN_infer(os.getenv("weight_ans_path"), self.config.device)
+                    self.gui_config.samplerate = 16000
+            else:
+                self.gui_config.samplerate = (
+                    self.rvc.tgt_sr
+                    if self.gui_config.sr_type == "sr_model"
+                    else self.get_device_samplerate()
+                )
+
             self.gui_config.channels = self.get_device_channels()
             self.zc = self.gui_config.samplerate // 100
             self.block_frame = (
@@ -883,9 +911,16 @@ if __name__ == "__main__":
                     self.block_frame :
                 ].clone()
                 input_wav = self.input_wav[-self.sola_buffer_frame - self.block_frame :]
-                input_wav = self.tg(
-                    input_wav.unsqueeze(0), self.input_wav.unsqueeze(0)
-                ).squeeze(0)
+                
+                if self.gui_config.denoise_algo == "default":
+                    input_wav = self.tg(
+                        input_wav.unsqueeze(0), self.input_wav.unsqueeze(0)
+                    ).squeeze(0)
+                elif self.gui_config.denoise_algo == "DFSMN":
+                    input_wav = self.dfsmn.forward_norm(input_wav)
+                elif self.gui_config.denoise_algo == "FRCRN":
+                    input_wav = self.frcrn.forward(input_wav)
+
                 input_wav[: self.sola_buffer_frame] *= self.fade_in_window
                 input_wav[: self.sola_buffer_frame] += (
                     self.nr_buffer * self.fade_out_window
